@@ -2,11 +2,13 @@
 guess(pattern, guessed_letters) interface used by hangman_sim.py, so it
 drops into the same validation harness as CandidateAgent.
 
-Inference: run the model on the current board mask, take the softmax
-distribution at every blank position, sum the probability mass per letter
-across all blanks (guessing a letter reveals every occurrence at once, so
-we want P(letter appears somewhere), not P(letter at one specific spot)),
-zero out already-guessed letters, return the argmax.
+Inference: run the model on the current board mask + the real guessed-
+wrong-letters vector + remaining-guesses fraction (both derived purely
+from pattern/guessed_letters, no interface change needed), take the
+softmax distribution at every blank position, sum the probability mass
+per letter across all blanks (guessing a letter reveals every occurrence
+at once, so we want P(letter appears somewhere), not P(letter at one
+specific spot)), zero out already-guessed letters, return the argmax.
 """
 from __future__ import annotations
 
@@ -16,9 +18,9 @@ from typing import Set
 import torch
 import torch.nn.functional as F
 
-from bilstm_model import ALPHABET, BiLSTMMasker, pattern_to_input_ids
+from bilstm_model import ALPHABET, BiLSTMMasker, pattern_to_input_ids, guessed_wrong_vector, remaining_feature
 
-DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_attn_masker.pt")
+DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_attn_feat_masker.pt")
 
 
 class BiLSTMAgent:
@@ -31,7 +33,10 @@ class BiLSTMAgent:
     @torch.no_grad()
     def guess(self, pattern: str, guessed_letters: Set[str]) -> str:
         ids = pattern_to_input_ids(pattern).unsqueeze(0).to(self.device)  # (1, L)
-        logits = self.model(ids)  # (1, L, 26)
+        wrong_vec = guessed_wrong_vector(pattern, guessed_letters).unsqueeze(0).to(self.device)  # (1, 26)
+        remaining = remaining_feature(pattern, guessed_letters).unsqueeze(0).to(self.device)  # (1, 1)
+
+        logits = self.model(ids, wrong_vec, remaining)  # (1, L, 26)
         probs = F.softmax(logits, dim=-1).squeeze(0)  # (L, 26)
 
         blank_mask = torch.tensor([c == "_" for c in pattern], device=self.device)

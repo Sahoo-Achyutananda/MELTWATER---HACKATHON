@@ -1,7 +1,7 @@
 """Validate the trained BiLSTM agent under the real adaptive rules, same
 methodology as validate_agent.py: hold out 10% of train.txt, play full
 interactive games (hangman_sim.play) against words the model never trained
-on. Run this after train_bilstm.py has produced bilstm_masker.pt.
+on. Run this after train_bilstm.py has produced bilstm_attn_feat_masker.pt.
 """
 import os
 import random
