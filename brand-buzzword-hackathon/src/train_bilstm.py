@@ -118,6 +118,12 @@ def main(epochs=EPOCHS):
     buckets = words_by_length(train_words)
     model = BiLSTMMasker().to(device)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
+    # cosine decay from LR down to ~0 over the full run -- ties T_max to
+    # whatever `epochs` is passed in, so raising epochs later still decays
+    # smoothly across the new full length with no further code changes.
+    # Earlier runs plateaued at a flat 1e-3 well before the loss stopped
+    # improving in absolute terms, which is exactly what this addresses.
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
     for epoch in range(1, epochs + 1):
@@ -135,8 +141,10 @@ def main(epochs=EPOCHS):
             opt.step()
             total_loss += loss.item()
             n_batches += 1
+        lr_now = scheduler.get_last_lr()[0]
+        scheduler.step()
         print(f"epoch {epoch}/{epochs}  loss={total_loss/n_batches:.4f}  "
-              f"batches={n_batches}  time={time.time()-t0:.0f}s")
+              f"lr={lr_now:.2e}  batches={n_batches}  time={time.time()-t0:.0f}s")
 
     torch.save(model.state_dict(), MODEL_PATH)
     print(f"saved {MODEL_PATH}")
