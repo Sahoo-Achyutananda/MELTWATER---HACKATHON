@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 from bilstm_model import ALPHABET, BiLSTMMasker, pattern_to_input_ids
 
-DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_masker.pt")
+DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_attn_masker.pt")
 
 
 class BiLSTMAgent:
