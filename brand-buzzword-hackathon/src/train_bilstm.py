@@ -32,7 +32,7 @@ from bilstm_model import ALPHABET, BiLSTMMasker, LETTER_IDX, MASK_TOKEN, LETTER_
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..")
 TRAIN_PATH = os.path.join(DATA_DIR, "train.txt")
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_attn_feat_masker.pt")
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_conv_attn_feat_masker.pt")
 
 SEED = 42
 VAL_FRAC = 0.1

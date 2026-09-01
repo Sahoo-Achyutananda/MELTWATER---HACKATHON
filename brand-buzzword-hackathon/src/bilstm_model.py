@@ -1,8 +1,23 @@
-"""BiLSTM + self-attention + explicit game-state features, trained with a
-masked-language-model objective, char-level. Forked from
-approach/bilstm-attention with one addition: the model no longer sees only
-the board pattern -- it's also fed which letters have already been
-confirmed wrong, and how many wrong guesses remain.
+"""Conv1D + BiLSTM + self-attention + explicit game-state features,
+trained with a masked-language-model objective, char-level. Forked from
+approach/full-combo with one architectural addition: a small Conv1D layer
+between the embedding and the LSTM.
+
+Why a conv front-end: English orthography is unusually locally-driven
+(q->u, common digraphs like "th"/"ch"/"sh", common endings like
+"-ing"/"-ion") -- exactly the kind of pattern a small local window is
+well suited to detect. The conv layer learns filters over 3-character
+windows before the recurrence runs, so each position's LSTM input already
+carries local sub-word structure rather than just a single raw character
+embedding -- a *learned* n-gram detector, versus the hand-counted n-gram
+model (ngram_model.py) that's blended in afterward as a separate signal.
+The conv output is concatenated with the raw embedding (not replacing it)
+so the LSTM still sees plain character identity alongside the local
+pattern features.
+
+The model no longer sees only the board pattern -- it's also fed which
+letters have already been confirmed wrong, and how many wrong guesses
+remain.
 
 Why this matters: the board pattern alone tells the model which positions
 are revealed, but says nothing about *failed* guesses -- a wrong guess
@@ -74,12 +89,17 @@ def remaining_feature(pattern: str, guessed_letters: Set[str]) -> torch.Tensor:
 
 
 class BiLSTMMasker(nn.Module):
-    def __init__(self, emb_dim: int = 32, hidden: int = 128, num_layers: int = 1,
+    def __init__(self, emb_dim: int = 32, conv_channels: int = 32, kernel_size: int = 3,
+                 hidden: int = 128, num_layers: int = 1,
                  dropout: float = 0.1, num_heads: int = 4, global_dim: int = 32):
         super().__init__()
         self.emb = nn.Embedding(VOCAB_SIZE, emb_dim)
+        # learned local-pattern detector over character windows, run before
+        # the recurrence; padding keeps the sequence length unchanged.
+        self.conv = nn.Conv1d(emb_dim, conv_channels, kernel_size=kernel_size, padding=kernel_size // 2)
+        self.conv_act = nn.ReLU()
         self.lstm = nn.LSTM(
-            emb_dim, hidden, num_layers=num_layers,
+            emb_dim + conv_channels, hidden, num_layers=num_layers,
             batch_first=True, bidirectional=True,
             dropout=dropout if num_layers > 1 else 0.0,
         )
@@ -105,8 +125,12 @@ class BiLSTMMasker(nn.Module):
         """x: (batch, seq_len) input token ids.
         guessed_wrong: (batch, 26) float. remaining: (batch, 1) float.
         -> (batch, seq_len, 26) logits."""
-        e = self.emb(x)
-        lstm_out, _ = self.lstm(e)  # (batch, seq_len, hidden*2)
+        e = self.emb(x)  # (batch, seq_len, emb_dim)
+        conv_out = self.conv_act(self.conv(e.transpose(1, 2)))  # (batch, conv_channels, seq_len)
+        conv_out = conv_out.transpose(1, 2)  # (batch, seq_len, conv_channels)
+        lstm_in = torch.cat([e, conv_out], dim=-1)  # (batch, seq_len, emb_dim+conv_channels)
+
+        lstm_out, _ = self.lstm(lstm_in)  # (batch, seq_len, hidden*2)
         attn_out, _ = self.attn(lstm_out, lstm_out, lstm_out, need_weights=False)
         out = self.norm(lstm_out + attn_out)  # (batch, seq_len, hidden*2)
 

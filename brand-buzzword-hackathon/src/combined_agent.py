@@ -45,7 +45,7 @@ import torch.nn.functional as F
 from candidate_agent import CandidateAgent, ALPHABET, LETTER_IDX
 from bilstm_model import BiLSTMMasker, pattern_to_input_ids, guessed_wrong_vector, remaining_feature
 
-DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_attn_feat_masker.pt")
+DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_conv_attn_feat_masker.pt")
 
 CANDIDATE_TRUST_K = 50
 NGRAM_WEIGHT_OF_REST = 0.3   # of the weight not given to candidate-filtering

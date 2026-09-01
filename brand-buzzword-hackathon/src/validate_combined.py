@@ -1,7 +1,7 @@
 """Validate the combined agent (candidate-filtering + n-gram + BiLSTM +
 vowel guard) under the real adaptive rules, same held-out-train.txt
 methodology as every other approach. Run after train_bilstm.py has
-produced bilstm_attn_feat_masker.pt.
+produced bilstm_conv_attn_feat_masker.pt.
 """
 import os
 import random
