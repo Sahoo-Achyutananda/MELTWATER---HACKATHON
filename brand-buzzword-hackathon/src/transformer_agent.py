@@ -1,0 +1,52 @@
+"""Wraps the trained Transformer masked-letter predictor into the standard
+guess(pattern, guessed_letters) interface used by hangman_sim.py.
+
+Inference: run the model on the current board mask + the real guessed-
+wrong-letters vector + remaining-guesses fraction (both derived purely
+from pattern/guessed_letters), take the softmax distribution at every
+blank position, sum the probability mass per letter across all blanks,
+zero out already-guessed letters, return the argmax.
+"""
+from __future__ import annotations
+
+import os
+from typing import Set
+
+import torch
+import torch.nn.functional as F
+
+from transformer_model import ALPHABET, TransformerMasker, pattern_to_input_ids, guessed_wrong_vector, remaining_feature
+
+DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "transformer_masker.pt")
+
+
+class TransformerAgent:
+    def __init__(self, model_path: str = DEFAULT_MODEL_PATH, device: str = "cpu"):
+        self.device = torch.device(device)
+        self.model = TransformerMasker().to(self.device)
+        self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+        self.model.eval()
+
+    @torch.no_grad()
+    def guess(self, pattern: str, guessed_letters: Set[str]) -> str:
+        ids = pattern_to_input_ids(pattern).unsqueeze(0).to(self.device)  # (1, L)
+        wrong_vec = guessed_wrong_vector(pattern, guessed_letters).unsqueeze(0).to(self.device)  # (1, 26)
+        remaining = remaining_feature(pattern, guessed_letters).unsqueeze(0).to(self.device)  # (1, 1)
+
+        logits = self.model(ids, wrong_vec, remaining)  # (1, L, 26)
+        probs = F.softmax(logits, dim=-1).squeeze(0)  # (L, 26)
+
+        blank_mask = torch.tensor([c == "_" for c in pattern], device=self.device)
+        if blank_mask.any():
+            agg = probs[blank_mask].sum(dim=0)  # (26,)
+        else:
+            agg = probs.sum(dim=0)
+
+        best_letter, best_score = None, -1.0
+        for i, c in enumerate(ALPHABET):
+            if c in guessed_letters:
+                continue
+            score = agg[i].item()
+            if score > best_score:
+                best_letter, best_score = c, score
+        return best_letter
