@@ -63,13 +63,30 @@ class EnsembleAgent:
         scores = {c: float((candidates == LETTER_IDX[c]).any(axis=1).sum()) / n for c in ALPHABET}
         return scores, n
 
+    @staticmethod
+    def _normalize(scores: dict, guessed_letters: Set[str]) -> dict:
+        """Rescale to a proper distribution over unguessed letters (sums to
+        1). Without this, cand_scores (a 0-1 fraction) and neural (a sum of
+        softmax probabilities across every blank -- easily >1 with several
+        blanks left) are on different scales, so the blend weight below
+        doesn't mean what it's supposed to: the numerically larger neural
+        term can dominate regardless of how confident candidate-filtering
+        is. Normalizing both to sum to 1 first makes `w` an actual mixing
+        proportion instead of an arbitrary multiplier on mismatched scales.
+        """
+        total = sum(v for c, v in scores.items() if c not in guessed_letters)
+        if total <= 0:
+            return {c: 0.0 for c in scores}
+        return {c: v / total for c, v in scores.items()}
+
     def guess(self, pattern: str, guessed_letters: Set[str]) -> str:
-        neural = self._neural_scores(pattern)
+        neural = self._normalize(self._neural_scores(pattern), guessed_letters)
         cand_scores, n_candidates = self._candidate_scores(pattern, guessed_letters)
 
         if cand_scores is None:
             blended = neural
         else:
+            cand_scores = self._normalize(cand_scores, guessed_letters)
             w = CANDIDATE_TRUST_K / (CANDIDATE_TRUST_K + n_candidates)
             blended = {c: w * cand_scores[c] + (1 - w) * neural[c] for c in ALPHABET}
 
