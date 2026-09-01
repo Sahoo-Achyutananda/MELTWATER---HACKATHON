@@ -13,7 +13,7 @@ import torch.nn.functional as F
 
 from gru_model import ALPHABET, BiGRUMasker, pattern_to_input_ids
 
-DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "gru_masker.pt")
+DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "gru_attn_masker.pt")
 
 
 class GRUAgent:

@@ -19,7 +19,7 @@ from gru_model import BiGRUMasker, LETTER_IDX, MASK_TOKEN, LETTER_TOKEN_OFFSET
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..")
 TRAIN_PATH = os.path.join(DATA_DIR, "train.txt")
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "gru_masker.pt")
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "gru_attn_masker.pt")
 
 SEED = 42
 VAL_FRAC = 0.1
