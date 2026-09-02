@@ -27,26 +27,33 @@ def load_words(path):
         return [line.strip().lower() for line in f if line.strip()]
 
 
-def evaluate(agent, words):
+def evaluate(agent, words, progress_every=2000):
     wins = 0
     total_wrong = 0
-    for w in words:
+    t0 = time.time()
+    for i, w in enumerate(words):
         won, wrong, _ = play(w, agent.guess)
         wins += int(won)
         total_wrong += wrong
+        if progress_every and (i + 1) % progress_every == 0:
+            elapsed = time.time() - t0
+            rate = (i + 1) / elapsed
+            eta = (len(words) - (i + 1)) / rate
+            print(f"  {i+1}/{len(words)}  win_rate_so_far={wins/(i+1):.4f}  "
+                  f"elapsed={elapsed:.0f}s  eta={eta:.0f}s")
     n = len(words)
     return wins / n, total_wrong / n
 
 
-def main():
+def main(full=False):
     random.seed(SEED)
     all_words = load_words(TRAIN_PATH)
     random.shuffle(all_words)
     n_val = int(len(all_words) * VAL_FRAC)
     val_words = all_words[:n_val]
     train_words = all_words[n_val:]
-    sample = val_words[:VAL_SAMPLE]
-    print(f"train={len(train_words)} val_sample={len(sample)} (of {len(val_words)})")
+    sample = val_words if full else val_words[:VAL_SAMPLE]
+    print(f"train={len(train_words)} val_sample={len(sample)} (of {len(val_words)}) full={full}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     agent = CombinedAgent(train_words, model_path=DEFAULT_MODEL_PATH, device=device)
@@ -58,4 +65,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--full", action="store_true", help="validate on all held-out words, not just the 3000-word sample")
+    args = p.parse_args()
+    main(full=args.full)
