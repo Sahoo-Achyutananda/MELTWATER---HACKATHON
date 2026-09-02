@@ -29,9 +29,24 @@ unguessed letters before blending (the ensemble branch's scale-mismatch
 bug taught us why this matters -- an unnormalized signal can numerically
 dominate regardless of what its blend weight says to trust).
 
-Blend weight: candidate-filtering gets w = K/(K+n_candidates) of the
-vote (more candidates -> less trust, same confidence handoff as
-approach/ensemble); the remaining weight is split 30/70 between ngram and
+Blend weight: candidate-filtering's trust is the MAX of two signals --
+absolute (w = K/(K+n_candidates), same as approach/ensemble) and relative
+(w = F/(F+n_candidates/total_L), where total_L is how many dictionary
+words of that length exist at all). The absolute-only version badly
+under-trusted candidate-filtering on short words: length-4 has only 5,235
+words total, so narrowing from a few misses down to a few hundred
+candidates is a huge, meaningful reduction (95%+ of that length's whole
+dictionary ruled out) -- but a few hundred is still "large" against the
+K=50 absolute threshold, so the old formula kept leaning on the neural/
+ngram blend even when precise dictionary evidence was already available.
+Diagnosed directly: replaying the 40-epoch conv1d submission against the
+real test.txt answers showed 88.4% of length-3-5 words failing, with
+traces showing the agent still guessing generically-common letters (n, r,
+l) several turns after confirmed misses had already ruled out most of a
+small dictionary's short words. The relative signal fixes this without
+weakening large-bucket behavior, since for big dictionaries the absolute
+signal already dominates the max() once real narrowing happens there too.
+The remaining (1 - w_cand) weight is split 30/70 between ngram and
 neural, favoring the model that generalizes furthest past the dictionary.
 """
 from __future__ import annotations
@@ -47,7 +62,8 @@ from bilstm_model import BiLSTMMasker, pattern_to_input_ids, guessed_wrong_vecto
 
 DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_conv_attn_feat_masker.pt")
 
-CANDIDATE_TRUST_K = 50
+CANDIDATE_TRUST_K = 50        # absolute-count trust: 50/50 point at K remaining candidates
+CANDIDATE_TRUST_FRAC = 0.05   # relative trust: 50/50 point at 5% of that length's dictionary remaining
 NGRAM_WEIGHT_OF_REST = 0.3   # of the weight not given to candidate-filtering
 NEURAL_WEIGHT_OF_REST = 0.7
 VOWELS = set("aeiou")
@@ -111,7 +127,13 @@ class CombinedAgent:
             cand_norm = {c: 0.0 for c in ALPHABET}
         else:
             cand_norm = self._normalize(cand_scores, guessed_letters)
-            w_cand = CANDIDATE_TRUST_K / (CANDIDATE_TRUST_K + n_candidates)
+            w_cand_abs = CANDIDATE_TRUST_K / (CANDIDATE_TRUST_K + n_candidates)
+
+            total_L = self.candidate.by_length_matrix[len(pattern)].shape[0]
+            frac_remaining = n_candidates / total_L
+            w_cand_rel = CANDIDATE_TRUST_FRAC / (CANDIDATE_TRUST_FRAC + frac_remaining)
+
+            w_cand = max(w_cand_abs, w_cand_rel)
 
         rest = 1.0 - w_cand
         blended = {
