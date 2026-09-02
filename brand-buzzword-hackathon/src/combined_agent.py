@@ -18,10 +18,12 @@ Signals:
     (reused directly, not rebuilt) -- a statistical signal that doesn't
     need an exact dictionary match, useful whenever candidate-filtering's
     pool is large or empty.
-  - neural: the trained BiLSTM's aggregated per-letter probability,
-    conditioned on the board AND the guessed-wrong-letters/remaining-
-    guesses features -- generalizes past both the dictionary and simple
-    n-gram statistics.
+  - neural: the trained BiLSTM's presence-head output (a dedicated sigmoid
+    prediction of "does letter X appear anywhere in the word", trained
+    directly against that ground truth, not approximated by summing per-
+    position softmax scores the way earlier branches did) conditioned on
+    the board AND the guessed-wrong-letters/remaining-guesses features --
+    generalizes past both the dictionary and simple n-gram statistics.
   - vowel guard: once more than half of the currently REVEALED letters are
     vowels, stop guessing further vowels (most words aren't majority-
     vowel, so continued vowel guesses are low-value at that point) --
@@ -60,12 +62,11 @@ from typing import Set
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from candidate_agent import CandidateAgent, ALPHABET, LETTER_IDX
 from bilstm_model import BiLSTMMasker, pattern_to_input_ids, guessed_wrong_vector, remaining_feature
 
-DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_conv_attn_feat_masker.pt")
+DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_dual_head_masker.pt")
 
 CANDIDATE_TRUST_K = 50        # absolute-count trust: 50/50 point at K remaining candidates
 CANDIDATE_TRUST_FRAC = 0.05   # relative trust: 50/50 point at 5% of that length's dictionary remaining
@@ -88,11 +89,9 @@ class CombinedAgent:
         ids = pattern_to_input_ids(pattern).unsqueeze(0).to(self.device)
         wrong_vec = guessed_wrong_vector(pattern, guessed_letters).unsqueeze(0).to(self.device)
         remaining = remaining_feature(pattern, guessed_letters).unsqueeze(0).to(self.device)
-        logits = self.model(ids, wrong_vec, remaining)
-        probs = F.softmax(logits, dim=-1).squeeze(0)
-        blank_mask = torch.tensor([c == "_" for c in pattern], device=self.device)
-        agg = probs[blank_mask].sum(dim=0) if blank_mask.any() else probs.sum(dim=0)
-        return {c: agg[i].item() for i, c in enumerate(ALPHABET)}
+        _, presence_logits = self.model(ids, wrong_vec, remaining)
+        probs = torch.sigmoid(presence_logits).squeeze(0)  # (26,) P(letter present anywhere)
+        return {c: probs[i].item() for i, c in enumerate(ALPHABET)}
 
     def _candidate_scores(self, pattern: str, guessed_letters: Set[str]):
         """Entropy-based, not frequency-based: score each unguessed letter

@@ -43,10 +43,26 @@ guessed-wrong set (random letters absent from the word) and remaining-
 guess count per example, decoupled from the masking itself, so the model
 learns to condition on both signals independently.
 
+Dual-objective addition: alongside the existing per-position masked-char
+head, a second **presence head** predicts, directly, whether each of the
+26 letters appears anywhere in the word at all -- a pooled, whole-word
+prediction (mean over the sequence), not per-position. Trained jointly
+(char cross-entropy + presence BCE) against the SAME encoder output, so
+the encoder learns representations useful for both objectives at once.
+
+Why this exists: the guess decision we actually care about is "does
+letter X appear anywhere in this word", but the model only ever produced
+per-position predictions -- we approximated presence by *summing*
+per-position softmax scores across all blanks, a heuristic, not something
+the model was ever directly trained to get right. The presence head
+closes that gap: it's supervised with the real ground truth ("is letter c
+in the true word", computable from the training word itself) rather than
+inferred after the fact from a proxy.
+
 Inference: feed the real board mask + the real guessed-wrong/remaining
-features through the trained model, get a softmax distribution per blank
-position, sum the probability mass per letter across all blanks, zero out
-already-guessed letters, and rank what's left.
+features through the trained model. The presence head's sigmoid output
+IS the per-letter guess score directly -- no more summing per-position
+softmax as a stand-in. Zero out already-guessed letters, rank what's left.
 """
 from __future__ import annotations
 
@@ -120,11 +136,14 @@ class BiLSTMMasker(nn.Module):
             nn.ReLU(),
         )
         self.head = nn.Linear(hidden * 2 + global_dim, 26)
+        # presence head: same feature width as the char head, but consumes
+        # a mean-pooled (whole-word) representation instead of per-position
+        self.presence_head = nn.Linear(hidden * 2 + global_dim, 26)
 
-    def forward(self, x: torch.Tensor, guessed_wrong: torch.Tensor, remaining: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, guessed_wrong: torch.Tensor, remaining: torch.Tensor):
         """x: (batch, seq_len) input token ids.
         guessed_wrong: (batch, 26) float. remaining: (batch, 1) float.
-        -> (batch, seq_len, 26) logits."""
+        -> (char_logits (batch, seq_len, 26), presence_logits (batch, 26))."""
         e = self.emb(x)  # (batch, seq_len, emb_dim)
         conv_out = self.conv_act(self.conv(e.transpose(1, 2)))  # (batch, conv_channels, seq_len)
         conv_out = conv_out.transpose(1, 2)  # (batch, seq_len, conv_channels)
@@ -136,7 +155,12 @@ class BiLSTMMasker(nn.Module):
 
         global_feat = torch.cat([guessed_wrong, remaining], dim=-1)  # (batch, 27)
         global_enc = self.global_encoder(global_feat)  # (batch, global_dim)
-        global_enc = global_enc.unsqueeze(1).expand(-1, out.size(1), -1)  # (batch, seq_len, global_dim)
+        global_enc_seq = global_enc.unsqueeze(1).expand(-1, out.size(1), -1)  # (batch, seq_len, global_dim)
 
-        combined = torch.cat([out, global_enc], dim=-1)
-        return self.head(combined)
+        combined = torch.cat([out, global_enc_seq], dim=-1)  # (batch, seq_len, hidden*2+global_dim)
+        char_logits = self.head(combined)  # (batch, seq_len, 26)
+
+        pooled = torch.cat([out.mean(dim=1), global_enc], dim=-1)  # (batch, hidden*2+global_dim)
+        presence_logits = self.presence_head(pooled)  # (batch, 26)
+
+        return char_logits, presence_logits

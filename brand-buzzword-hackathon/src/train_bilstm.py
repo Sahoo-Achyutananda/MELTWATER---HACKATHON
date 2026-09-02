@@ -16,6 +16,12 @@ build the 26-dim indicator vector, and set remaining = (6 - count) / 6.
 This is sampled independently of the masking fraction -- a real game
 correlates the two, but decoupling them here still teaches the model to
 condition on both signals rather than ignore one.
+
+Dual objective: each example also gets a presence label (26-dim, 1 if
+that letter is anywhere in the word, computed directly from the word
+regardless of masking) for the presence head. Combined loss = masked-char
+cross-entropy + presence binary cross-entropy, weighted by
+PRESENCE_LOSS_WEIGHT.
 """
 from __future__ import annotations
 
@@ -32,7 +38,7 @@ from bilstm_model import ALPHABET, BiLSTMMasker, LETTER_IDX, MASK_TOKEN, LETTER_
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..")
 TRAIN_PATH = os.path.join(DATA_DIR, "train.txt")
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_conv_attn_feat_masker.pt")
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_dual_head_masker.pt")
 
 SEED = 42
 VAL_FRAC = 0.1
@@ -40,6 +46,7 @@ BATCH_SIZE = 256
 EPOCHS = 20
 LR = 1e-3
 MIN_BUCKET_SIZE = 8  # skip length buckets too small to batch sensibly
+PRESENCE_LOSS_WEIGHT = 1.0
 
 
 def load_words(path):
@@ -61,9 +68,13 @@ def make_batch(words_of_len_L, device):
     targets = torch.full((n, L), -100, dtype=torch.long)
     guessed_wrong = torch.zeros((n, 26), dtype=torch.float32)
     remaining = torch.empty((n, 1), dtype=torch.float32)
+    presence = torch.zeros((n, 26), dtype=torch.float32)
 
     mask_frac = random.uniform(0.15, 0.85)
     for i, w in enumerate(words_of_len_L):
+        for c in set(w):
+            presence[i, LETTER_IDX[c]] = 1.0
+
         masked_any = False
         for j, c in enumerate(w):
             true_idx = LETTER_IDX[c]
@@ -84,7 +95,8 @@ def make_batch(words_of_len_L, device):
             guessed_wrong[i, LETTER_IDX[c]] = 1.0
         remaining[i, 0] = (MAX_WRONG - n_wrong) / MAX_WRONG
 
-    return batch_ids.to(device), targets.to(device), guessed_wrong.to(device), remaining.to(device)
+    return (batch_ids.to(device), targets.to(device), guessed_wrong.to(device),
+            remaining.to(device), presence.to(device))
 
 
 def iter_batches(buckets, batch_size):
@@ -124,26 +136,35 @@ def main(epochs=EPOCHS):
     # Earlier runs plateaued at a flat 1e-3 well before the loss stopped
     # improving in absolute terms, which is exactly what this addresses.
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
-    loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    char_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    presence_loss_fn = nn.BCEWithLogitsLoss()
 
     for epoch in range(1, epochs + 1):
         model.train()
         t0 = time.time()
         batches = iter_batches(buckets, BATCH_SIZE)
-        total_loss = 0.0
+        total_loss, total_char_loss, total_presence_loss = 0.0, 0.0, 0.0
         n_batches = 0
         for chunk in batches:
-            ids, targets, guessed_wrong, remaining = make_batch(chunk, device)
-            logits = model(ids, guessed_wrong, remaining)
-            loss = loss_fn(logits.reshape(-1, 26), targets.reshape(-1))
+            ids, targets, guessed_wrong, remaining, presence = make_batch(chunk, device)
+            char_logits, presence_logits = model(ids, guessed_wrong, remaining)
+            char_loss = char_loss_fn(char_logits.reshape(-1, 26), targets.reshape(-1))
+            presence_loss = presence_loss_fn(presence_logits, presence)
+            loss = char_loss + PRESENCE_LOSS_WEIGHT * presence_loss
+
             opt.zero_grad()
             loss.backward()
             opt.step()
+
             total_loss += loss.item()
+            total_char_loss += char_loss.item()
+            total_presence_loss += presence_loss.item()
             n_batches += 1
         lr_now = scheduler.get_last_lr()[0]
         scheduler.step()
         print(f"epoch {epoch}/{epochs}  loss={total_loss/n_batches:.4f}  "
+              f"char_loss={total_char_loss/n_batches:.4f}  "
+              f"presence_loss={total_presence_loss/n_batches:.4f}  "
               f"lr={lr_now:.2e}  batches={n_batches}  time={time.time()-t0:.0f}s")
 
     torch.save(model.state_dict(), MODEL_PATH)
