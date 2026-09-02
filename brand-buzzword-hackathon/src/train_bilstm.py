@@ -16,6 +16,16 @@ build the 26-dim indicator vector, and set remaining = (6 - count) / 6.
 This is sampled independently of the masking fraction -- a real game
 correlates the two, but decoupling them here still teaches the model to
 condition on both signals rather than ignore one.
+
+Seed ensembling: `--seed` controls only weight initialization and
+training-time stochasticity (batch order, mask fractions, synthetic
+wrong-guess sampling), NOT the train/val split, which stays fixed at the
+original SEED regardless of `--seed` -- every seed run trains on the
+same word set and is honestly comparable against the same held-out
+validation words as every other branch. Running this a few times with
+different `--seed` values and pointing combined_agent.py at all the
+resulting checkpoints averages out each individual run's idiosyncratic
+mistakes (approach/full-combo-conv1d-ensemble).
 """
 from __future__ import annotations
 
@@ -32,9 +42,13 @@ from bilstm_model import ALPHABET, BiLSTMMasker, LETTER_IDX, MASK_TOKEN, LETTER_
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..")
 TRAIN_PATH = os.path.join(DATA_DIR, "train.txt")
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_conv_attn_feat_masker.pt")
 
-SEED = 42
+
+def model_path_for_seed(seed):
+    return os.path.join(os.path.dirname(__file__), f"bilstm_conv_attn_feat_masker_seed{seed}.pt")
+
+
+SEED = 42  # fixed train/val split seed -- never changes across ensemble members
 VAL_FRAC = 0.1
 BATCH_SIZE = 256
 EPOCHS = 20
@@ -102,18 +116,25 @@ def iter_batches(buckets, batch_size):
     return batches
 
 
-def main(epochs=EPOCHS):
+def main(epochs=EPOCHS, seed=SEED):
+    # split seed is always the fixed SEED, regardless of `seed` -- every
+    # ensemble member trains/validates on the exact same word split, so
+    # they stay honestly comparable and none of them can accidentally
+    # train on another member's held-out validation words.
     random.seed(SEED)
-    torch.manual_seed(SEED)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"device={device}")
-
     all_words = load_words(TRAIN_PATH)
     random.shuffle(all_words)
     n_val = int(len(all_words) * VAL_FRAC)
     val_words = all_words[:n_val]
     train_words = all_words[n_val:]
-    print(f"train={len(train_words)} val={len(val_words)}")
+    print(f"train={len(train_words)} val={len(val_words)} seed={seed}")
+
+    # now switch to the per-run seed for weight init and training-time
+    # stochasticity (batch order, mask fractions, wrong-guess sampling)
+    random.seed(seed)
+    torch.manual_seed(seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"device={device}")
 
     buckets = words_by_length(train_words)
     model = BiLSTMMasker().to(device)
@@ -146,13 +167,16 @@ def main(epochs=EPOCHS):
         print(f"epoch {epoch}/{epochs}  loss={total_loss/n_batches:.4f}  "
               f"lr={lr_now:.2e}  batches={n_batches}  time={time.time()-t0:.0f}s")
 
-    torch.save(model.state_dict(), MODEL_PATH)
-    print(f"saved {MODEL_PATH}")
+    model_path = model_path_for_seed(seed)
+    torch.save(model.state_dict(), model_path)
+    print(f"saved {model_path}")
 
 
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--epochs", type=int, default=EPOCHS)
+    p.add_argument("--seed", type=int, default=SEED,
+                    help="training-randomness seed for this ensemble member (train/val split is always fixed)")
     args = p.parse_args()
-    main(epochs=args.epochs)
+    main(epochs=args.epochs, seed=args.seed)

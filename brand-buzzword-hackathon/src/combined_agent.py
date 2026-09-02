@@ -5,6 +5,16 @@ write-up (pattern-matching dictionary + vowel-ratio heuristic + n-grams)
 plus our own BiLSTM branch, combined into one agent instead of kept
 separate.
 
+Seed ensembling: the neural signal can be one checkpoint or several. If
+multiple `bilstm_conv_attn_feat_masker_seed*.pt` files are present (see
+train_bilstm.py's `--seed`), DEFAULT_MODEL_PATH picks all of them up and
+_neural_scores averages their softmax outputs before aggregating over
+blanks -- same architecture and same train/val split for every member
+(only weight init and training-time stochasticity differ), so this is
+plain bagging, not a new signal. Falls back to the single non-seeded
+checkpoint when no seed files exist, so this stays a no-op for anyone
+still training just one model.
+
 Signals:
   - candidate: entropy-based, not frequency-based -- scores each letter by
     how much guessing it would split the remaining dictionary candidates
@@ -55,6 +65,7 @@ neural, favoring the model that generalizes furthest past the dictionary.
 """
 from __future__ import annotations
 
+import glob
 import os
 from typing import Set
 
@@ -65,7 +76,9 @@ import torch.nn.functional as F
 from candidate_agent import CandidateAgent, ALPHABET, LETTER_IDX
 from bilstm_model import BiLSTMMasker, pattern_to_input_ids, guessed_wrong_vector, remaining_feature
 
-DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_conv_attn_feat_masker.pt")
+_SRC_DIR = os.path.dirname(__file__)
+_SEED_CHECKPOINTS = sorted(glob.glob(os.path.join(_SRC_DIR, "bilstm_conv_attn_feat_masker_seed*.pt")))
+DEFAULT_MODEL_PATH = _SEED_CHECKPOINTS if _SEED_CHECKPOINTS else os.path.join(_SRC_DIR, "bilstm_conv_attn_feat_masker.pt")
 
 CANDIDATE_TRUST_K = 50        # absolute-count trust: 50/50 point at K remaining candidates
 CANDIDATE_TRUST_FRAC = 0.05   # relative trust: 50/50 point at 5% of that length's dictionary remaining
@@ -76,22 +89,32 @@ VOWEL_RATIO_THRESHOLD = 0.5
 
 
 class CombinedAgent:
-    def __init__(self, dictionary_words, model_path: str = DEFAULT_MODEL_PATH, device: str = "cpu"):
+    def __init__(self, dictionary_words, model_path=DEFAULT_MODEL_PATH, device: str = "cpu"):
         self.candidate = CandidateAgent(dictionary_words)  # also builds its own n-gram fallback
         self.device = torch.device(device)
-        self.model = BiLSTMMasker().to(self.device)
-        self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-        self.model.eval()
+        model_paths = model_path if isinstance(model_path, (list, tuple)) else [model_path]
+        self.models = []
+        for path in model_paths:
+            m = BiLSTMMasker().to(self.device)
+            m.load_state_dict(torch.load(path, map_location=self.device))
+            m.eval()
+            self.models.append(m)
+        print(f"[combined_agent] neural signal averaged over {len(self.models)} checkpoint(s): "
+              f"{[os.path.basename(p) for p in model_paths]}")
 
     @torch.no_grad()
     def _neural_scores(self, pattern: str, guessed_letters: Set[str]) -> dict:
         ids = pattern_to_input_ids(pattern).unsqueeze(0).to(self.device)
         wrong_vec = guessed_wrong_vector(pattern, guessed_letters).unsqueeze(0).to(self.device)
         remaining = remaining_feature(pattern, guessed_letters).unsqueeze(0).to(self.device)
-        logits = self.model(ids, wrong_vec, remaining)
-        probs = F.softmax(logits, dim=-1).squeeze(0)
+        probs_sum = None
+        for m in self.models:
+            logits = m(ids, wrong_vec, remaining)
+            probs = F.softmax(logits, dim=-1).squeeze(0)
+            probs_sum = probs if probs_sum is None else probs_sum + probs
+        probs_avg = probs_sum / len(self.models)
         blank_mask = torch.tensor([c == "_" for c in pattern], device=self.device)
-        agg = probs[blank_mask].sum(dim=0) if blank_mask.any() else probs.sum(dim=0)
+        agg = probs_avg[blank_mask].sum(dim=0) if blank_mask.any() else probs_avg.sum(dim=0)
         return {c: agg[i].item() for i, c in enumerate(ALPHABET)}
 
     def _candidate_scores(self, pattern: str, guessed_letters: Set[str]):
