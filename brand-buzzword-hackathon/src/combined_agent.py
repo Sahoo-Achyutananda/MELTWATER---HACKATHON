@@ -1,9 +1,12 @@
 """Four-signal combined agent: dictionary candidate-filtering + character
-n-gram fallback + the trained BiLSTM (attention + guessed-wrong/remaining
-features) + a vowel-ratio guard rail. Mirrors the reference repo's NLP
-write-up (pattern-matching dictionary + vowel-ratio heuristic + n-grams)
-plus our own BiLSTM branch, combined into one agent instead of kept
-separate.
+n-gram fallback + a trained char-level Transformer (self-attention,
+guessed-wrong/remaining features) + a vowel-ratio guard rail. Forked from
+approach/full-combo-conv1d with one swap: the neural signal is now the
+Transformer encoder (approach/transformer) trained for a much longer
+budget, in place of the Conv1D+BiLSTM, to see whether more training time
+on a no-recurrence architecture beats the recurrent one at the same
+blend. Everything else -- candidate-filtering, n-gram, vowel guard, blend
+weights -- is unchanged, so this isolates exactly one variable.
 
 Signals:
   - candidate: entropy-based, not frequency-based -- scores each letter by
@@ -18,10 +21,10 @@ Signals:
     (reused directly, not rebuilt) -- a statistical signal that doesn't
     need an exact dictionary match, useful whenever candidate-filtering's
     pool is large or empty.
-  - neural: the trained BiLSTM's aggregated per-letter probability,
-    conditioned on the board AND the guessed-wrong-letters/remaining-
-    guesses features -- generalizes past both the dictionary and simple
-    n-gram statistics.
+  - neural: the trained Transformer's aggregated per-letter probability
+    (per-position softmax, summed across blank positions), conditioned on
+    the board AND the guessed-wrong-letters/remaining-guesses features --
+    generalizes past both the dictionary and simple n-gram statistics.
   - vowel guard: once more than half of the currently REVEALED letters are
     vowels, stop guessing further vowels (most words aren't majority-
     vowel, so continued vowel guesses are low-value at that point) --
@@ -63,9 +66,9 @@ import torch
 import torch.nn.functional as F
 
 from candidate_agent import CandidateAgent, ALPHABET, LETTER_IDX
-from bilstm_model import BiLSTMMasker, pattern_to_input_ids, guessed_wrong_vector, remaining_feature
+from transformer_model import TransformerMasker, pattern_to_input_ids, guessed_wrong_vector, remaining_feature
 
-DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_conv_attn_feat_masker.pt")
+DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(__file__), "transformer_masker.pt")
 
 CANDIDATE_TRUST_K = 50        # absolute-count trust: 50/50 point at K remaining candidates
 CANDIDATE_TRUST_FRAC = 0.05   # relative trust: 50/50 point at 5% of that length's dictionary remaining
@@ -79,7 +82,7 @@ class CombinedAgent:
     def __init__(self, dictionary_words, model_path: str = DEFAULT_MODEL_PATH, device: str = "cpu"):
         self.candidate = CandidateAgent(dictionary_words)  # also builds its own n-gram fallback
         self.device = torch.device(device)
-        self.model = BiLSTMMasker().to(self.device)
+        self.model = TransformerMasker().to(self.device)
         self.model.load_state_dict(torch.load(model_path, map_location=self.device))
         self.model.eval()
 

@@ -1,24 +1,31 @@
-"""Train the BiLSTM masked-letter predictor (+ game-state features) on
-train.txt.
+"""Train the char-level Transformer masked-letter predictor on train.txt.
 
 Batches are formed within same-length buckets (no padding needed -- every
 word in a batch has identical sequence length). Each word gets a random
 mask fraction per batch (sampled per-batch, roughly uniform in [0.15, 0.85])
 so the model learns to work from both early-game (mostly masked) and
-late-game (mostly revealed) board states, since real games pass through
-the whole range.
+late-game (mostly revealed) board states.
 
 Alongside masking, each example also gets a synthetic "guessed-wrong"
 letter set and a matching "remaining guesses" value: pick a random count
 of wrong guesses (0-5), sample that many letters from the alphabet that
-are NOT in the word (a real wrong guess couldn't have revealed anything),
-build the 26-dim indicator vector, and set remaining = (6 - count) / 6.
-This is sampled independently of the masking fraction -- a real game
-correlates the two, but decoupling them here still teaches the model to
-condition on both signals rather than ignore one.
+are NOT in the word, build the 26-dim indicator vector, and set
+remaining = (6 - count) / 6. Sampled independently of the masking
+fraction, same as the BiLSTM branches.
+
+Learning rate: linear warmup followed by cosine decay, not a flat rate or
+decay-from-step-one. Transformers are more sensitive to the learning rate
+early in training than recurrent models -- without warmup the first few
+updates can push the randomly-initialized attention weights somewhere
+the optimizer struggles to recover from. Peak LR is also lower than the
+BiLSTM branches' 1e-3 (3e-4 here), since attention has no built-in
+regularizing bias the way RNN recurrence does and is more prone to
+overfitting a modest word list -- also why dropout defaults higher
+(0.2) on the model itself.
 """
 from __future__ import annotations
 
+import math
 import os
 import random
 import sys
@@ -28,17 +35,18 @@ import torch
 import torch.nn as nn
 
 sys.path.insert(0, os.path.dirname(__file__))
-from bilstm_model import ALPHABET, BiLSTMMasker, LETTER_IDX, MASK_TOKEN, LETTER_TOKEN_OFFSET, MAX_WRONG
+from transformer_model import ALPHABET, TransformerMasker, LETTER_IDX, MASK_TOKEN, LETTER_TOKEN_OFFSET, MAX_WRONG
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..")
 TRAIN_PATH = os.path.join(DATA_DIR, "train.txt")
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "bilstm_conv_attn_feat_masker.pt")
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "transformer_masker.pt")
 
 SEED = 42
 VAL_FRAC = 0.1
 BATCH_SIZE = 256
 EPOCHS = 20
-LR = 1e-3
+LR = 3e-4
+WARMUP_FRAC = 0.1  # fraction of total epochs spent ramping up to LR
 MIN_BUCKET_SIZE = 8  # skip length buckets too small to batch sensibly
 
 
@@ -102,6 +110,15 @@ def iter_batches(buckets, batch_size):
     return batches
 
 
+def warmup_cosine(epoch: int, total_epochs: int, warmup_epochs: int) -> float:
+    """LR multiplier: linear ramp to 1.0 over warmup_epochs, then cosine
+    decay to ~0 by the final epoch."""
+    if epoch < warmup_epochs:
+        return (epoch + 1) / max(1, warmup_epochs)
+    progress = (epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
+    return 0.5 * (1 + math.cos(math.pi * progress))
+
+
 def main(epochs=EPOCHS):
     random.seed(SEED)
     torch.manual_seed(SEED)
@@ -116,14 +133,12 @@ def main(epochs=EPOCHS):
     print(f"train={len(train_words)} val={len(val_words)}")
 
     buckets = words_by_length(train_words)
-    model = BiLSTMMasker().to(device)
+    model = TransformerMasker().to(device)
     opt = torch.optim.Adam(model.parameters(), lr=LR)
-    # cosine decay from LR down to ~0 over the full run -- ties T_max to
-    # whatever `epochs` is passed in, so raising epochs later still decays
-    # smoothly across the new full length with no further code changes.
-    # Earlier runs plateaued at a flat 1e-3 well before the loss stopped
-    # improving in absolute terms, which is exactly what this addresses.
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
+    warmup_epochs = max(1, int(epochs * WARMUP_FRAC))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        opt, lr_lambda=lambda e: warmup_cosine(e, epochs, warmup_epochs)
+    )
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
     for epoch in range(1, epochs + 1):
